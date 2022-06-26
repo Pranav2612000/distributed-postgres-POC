@@ -48,6 +48,12 @@ type pgResult struct {
   rows       [][]any
 }
 
+type pgConn struct {
+  conn net.Conn
+  db *bolt.DB
+  r *raft.Raft
+}
+
 func (pe *pgEngine) getTableDefinition(name string) (*tableDefinition, error) {
   var tbl tableDefinition
   err := pe.db.View(func(tx *bolt.Tx) error {
@@ -241,6 +247,70 @@ func (pe *pgEngine) delete() error {
   })
 }
 
+func (pc pgConn) handle() {
+  pgc := pgproto3.NewBackend(pgproto3.NewChunkReader(pc.conn), pc.conn)
+  defer pc.conn.Close()
+
+  err := pc.handleStartupMessage(pgc)
+  if err != nil {
+    log.Println(err)
+    return
+  }
+
+  for {
+    err := pc.handleMessage(pgc)
+    if err != nil {
+      log.Println(err)
+      return
+    }
+  }
+}
+
+func (pc pgConn) handleStartupMessage(pgconn *pgproto3.Backend) error {
+  startupMessage, err := pgconn.ReceiveStartupMessage()
+  if err != nil {
+    return fmt.Errorf("Error receiving startup message: %s", err)
+  }
+
+  switch startupMessage.(type) {
+  case *pgproto3.StartupMessage:
+    buf := (&pgproto3.AuthenticationOk{}).Encode(nil)
+    buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
+    _, err = pc.conn.Write(&buf)
+    if err != nil {
+      return fmt.Errorf("Error sending ready for query: %s", err)
+    }
+    return nil
+  case *pgproto3.SSLRequest:
+    _, err = pc.conn.Write([]byte("N"))
+    if err != nil {
+      return fmt.Errorf("Error sending deny SSL Request: %s")
+    }
+
+    return pc.handleStartupMessage(pgconn)
+  default:
+    return fmt.Errorf("Unknown startup message: %#v", startupMessage)
+  }
+}
+
+func handleMessage(pgc *pgproto3.Backend) error {
+  msg, err := pgc.Receive()
+  if err != nil {
+    return fmt.Errorf("Error receiving message: %s", err)
+  }
+
+  switch t := msg.(type) {
+  case *pgproto3.Query:
+    //TODO
+  case *pgproto3.Terminate:
+    return nil
+  default:
+    return fmt.Errorf("Received message other than query and terminate")
+  }
+
+  return nil
+}
+
 func (sn snapshotNoop) Persist(sink raft.SnapshotSink) error {
   return sink.Cancel()
 }
@@ -339,6 +409,22 @@ func (hs httpServer) addFollowerHandler(w http.ResponseWriter, r *http.Request) 
   }
 
   w.WriteHeader(http.StatusOK)
+}
+
+func runPgServer(port string, db *bolt.DB, r *raft.Raft) {
+  ln, err := net.Listen("tcp", "localhost:" + port)
+  if err != nil {
+    log.Fatal(err)
+  }
+
+  for {
+    conn, err := ln.Accept()
+    if err != nil {
+      log.Fatal(err)
+    }
+    pc := pgConn{conn, db, r}
+    go pc.handle()
+  }
 }
 
 /*
