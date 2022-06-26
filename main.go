@@ -42,6 +42,12 @@ type tableDefinition struct {
   ColumnTypes []string
 }
 
+type pgResult struct {
+  fieldNames []string
+  fieldTypes []string
+  rows       [][]any
+}
+
 func (pe *pgEngine) getTableDefinition(name string) (*tableDefinition, error) {
   var tbl tableDefinition
   err := pe.db.View(func(tx *bolt.Tx) error {
@@ -170,6 +176,59 @@ func (pe *pgEngine) executeInsert(stmt *pgquery.InsertStmt) error {
   }
 
   return nil
+}
+
+func (pe *pgEngine) executeSelect(stmt *pgquery.SelectStmt) (*pgResult, error) {
+  tblName := stmt.FromClause[0].GetRangeVar().Relname
+  tbl, err := pe.getTableDefinition(tblName)
+  if err != nil {
+    return nil, err
+  }
+
+  results := &pgResult{}
+  for _, c := range stmt.TargetList {
+    fieldName := c.GetResTarget().Val.GetColumnRef().Fields[0].GetString_().Str
+    results.fieldNames = append(results.fieldNames, fieldName)
+
+    fieldType := ""
+    for i, cn := range tbl.ColumnNames {
+      if cn == fieldName {
+        fieldType = tbl.ColumnTypes[i]
+      }
+    }
+
+    if fieldType == "" {
+      return nil, fmt.Errorf("Unknown field: %s", err)
+    }
+
+    results.fieldTypes = append(results.fieldTypes, fieldType)
+  }
+
+  prefix := []byte("rows_" + tblName + "_")
+  pe.db.View(func(tx *bolt.Tx) error {
+    c := tx.Bucket(pe.bucketName).Cursor()
+
+    for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+      var row []any
+      err := json.Unmarshal(v, &row)
+      if err != nil {
+        return fmt.Errorf("Unable to unmarshal rows: %s", err)
+      }
+
+      var targetRow []any
+      for _, target := range results.fieldNames {
+        for i, field := range tbl.ColumnNames {
+          if target == field {
+            targetRow = append(targetRow, row[i])
+          }
+        }
+      }
+
+      results.rows = append(results.rows, targetRow)
+    }
+    return nil
+  })
+  return results, nil
 }
 
 func (sn snapshotNoop) Persist(sink raft.SnapshotSink) error {
