@@ -231,6 +231,16 @@ func (pe *pgEngine) executeSelect(stmt *pgquery.SelectStmt) (*pgResult, error) {
   return results, nil
 }
 
+func (pe *pgEngine) delete() error {
+  return pe.db.Update(func (tx *bol.Tx) {
+    bkt := tx.bucket(pe.bucketName)
+    if bkt != nil {
+      return tx.DeleteBucket(pe.bucketName)
+    }
+    return nil
+  })
+}
+
 func (sn snapshotNoop) Persist(sink raft.SnapshotSink) error {
   return sink.Cancel()
 }
