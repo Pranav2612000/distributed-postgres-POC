@@ -238,8 +238,8 @@ func (pe *pgEngine) executeSelect(stmt *pgquery.SelectStmt) (*pgResult, error) {
 }
 
 func (pe *pgEngine) delete() error {
-  return pe.db.Update(func (tx *bol.Tx) {
-    bkt := tx.bucket(pe.bucketName)
+  return pe.db.Update(func(tx *bolt.Tx) error {
+    bkt := tx.Bucket(pe.bucketName)
     if bkt != nil {
       return tx.DeleteBucket(pe.bucketName)
     }
@@ -276,7 +276,7 @@ func (pc pgConn) handleStartupMessage(pgconn *pgproto3.Backend) error {
   case *pgproto3.StartupMessage:
     buf := (&pgproto3.AuthenticationOk{}).Encode(nil)
     buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
-    _, err = pc.conn.Write(&buf)
+    _, err = pc.conn.Write(buf)
     if err != nil {
       return fmt.Errorf("Error sending ready for query: %s", err)
     }
@@ -293,7 +293,7 @@ func (pc pgConn) handleStartupMessage(pgconn *pgproto3.Backend) error {
   }
 }
 
-func handleMessage(pgc *pgproto3.Backend) error {
+func (pc pgConn) handleMessage(pgc *pgproto3.Backend) error {
   msg, err := pgc.Receive()
   if err != nil {
     return fmt.Errorf("Error receiving message: %s", err)
@@ -301,7 +301,39 @@ func handleMessage(pgc *pgproto3.Backend) error {
 
   switch t := msg.(type) {
   case *pgproto3.Query:
-    //TODO
+    stmts, err := pgquery.Parse(t.String)
+    if err != nil {
+      return fmt.Errorf("Error parsing query: %s", err)
+    }
+
+    if len(stmts.GetStmts()) > 1 {
+      return fmt.Errorf("Only make one request at a time")
+    }
+
+    stmt := stmts.GetStmts()[0]
+
+    s := stmt.GetStmt().GetSelectStmt()
+    if s != nil {
+      pe := newPgEngine(pc.db)
+      res, err := pe.executeSelect(s)
+      if err != nil {
+        return err
+      }
+
+      pc.writePgResult(res)
+      return nil
+    }
+
+    future := pc.r.Apply([]byte(t.String), 500 * time.Millisecond)
+    if err != nil {
+      return fmt.Errorf("Could not apply: %s", err)
+    }
+    e := future.Response()
+    if e != nil {
+      return fmt.Errorf("Could not apply (internal): %s", e)
+    }
+
+    pc.done(nil, strings.ToUpper(strings.Split(t.String, " ")[0]) + " ok")
   case *pgproto3.Terminate:
     return nil
   default:
