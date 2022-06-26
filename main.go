@@ -343,6 +343,47 @@ func (pc pgConn) handleMessage(pgc *pgproto3.Backend) error {
   return nil
 }
 
+func (pc pgConn) done(buf []byte, msg string) {
+  buf = (&pg.pgproto3.CommandComplete{CommandTag: []byte(msg)}).Encode(buf)
+  buf = (&pg.pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
+  _, err := pc.conn.Write(buf)
+  if err != nil {
+    log.Printf("Failed to write query response: %s", err)
+  }
+}
+
+var dataTypeOIDMap = map[string]uint32{
+  "text": 25,
+  "pg_catalog.int4": 23
+}
+
+func (pc pgConn) writePgResult(res *pgResult) {
+  rd := &pgproto3.RowDescription{}
+  for i, field := range res.fieldNames {
+    rd.Fields = append(rd.Fields, pg.proto3.FieldDescription{
+      Name:        []byte(field),
+      DataTypeOID: dataTypeOIDMap[res.fieldTypes[i]]
+    })
+  }
+  buf = rd.Encode(nil)
+  for _, row := range res.rows {
+    dr := &pgproto3.DataRow{}
+    for _, value := range row {
+      bs, err := json.Marshal(value)
+      if err != nil {
+        log.Printf("Failed to marshall cell: %s\n", err)
+        return
+      }
+
+      dr.Values = append(dr.Values, bs)
+    }
+
+    buf = dr.Encode(buf)
+  }
+
+  pc.done(buf, fmt.Sprintf("SELECT %d", len(res.rows)))
+}
+
 func (sn snapshotNoop) Persist(sink raft.SnapshotSink) error {
   return sink.Cancel()
 }
@@ -458,6 +499,14 @@ func runPgServer(port string, db *bolt.DB, r *raft.Raft) {
     go pc.handle()
   }
 }
+
+type config struct {
+  id       string
+  httpPort string
+  raftPort string
+  pgPort   string
+}
+
 
 /*
 
