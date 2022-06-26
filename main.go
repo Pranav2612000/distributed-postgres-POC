@@ -128,6 +128,50 @@ func (pe *pgEngine) executeCreate(stmt *pgquery.CreateStmt) error {
   return nil
 }
 
+func (pe *pgEngine) executeInsert(stmt *pgquery.InsertStmt) error {
+  tblName := stmt.Relation.Relname
+
+  slct := stmt.GetSelectStmt().GetSelectStmt()
+  for _, values := range slct.ValuesLists {
+    var rowData []any
+    for _, value := range values.GetList().Items {
+      if c := value.GetAConst(); c != nil {
+        if s := c.Val.GetString_(); s != nil {
+          rowData = append(rowData, s.Str)
+          continue
+        }
+
+        if i := c.Val.GetInteger(); i  != nil {
+          rowData = append(rowData, i.Ival)
+          continue
+        }
+      }
+
+      return fmt.Errorf("Unknown value type: %s", value)
+    }
+
+    rowBytes, err := json.Marshal(rowData)
+    if err != nil {
+      return fmt.Errorf("Could not marshal row: %s", err)
+    }
+
+    id := uuid.New().String()
+    err = pe.db.Update(func(tx *bolt.Tx) error {
+      bkt, err := tx.CreateBucketIfNotExists(pe.bucketName)
+      if err != nil {
+        return err
+      }
+
+      return bkt.Put([]byte("rows_" + tblName + "_" + id), rowBytes)
+    })
+    if err != nil {
+      return fmt.Errorf("Could not insert row: %s", err)
+    }
+  }
+
+  return nil
+}
+
 func (sn snapshotNoop) Persist(sink raft.SnapshotSink) error {
   return sink.Cancel()
 }
