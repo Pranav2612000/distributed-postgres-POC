@@ -62,7 +62,7 @@ func (pe *pgEngine) getTableDefinition(name string) (*tableDefinition, error) {
       return fmt.Errorf("Table does not exist")
     }
 
-    valBytes := bkt.Get([]byte("table_" + name))
+    valBytes := bkt.Get([]byte("tables_" + name))
     err := json.Unmarshal(valBytes, &tbl)
     if err != nil {
       return fmt.Errorf("Could not unmarshal table: %s", err)
@@ -344,8 +344,8 @@ func (pc pgConn) handleMessage(pgc *pgproto3.Backend) error {
 }
 
 func (pc pgConn) done(buf []byte, msg string) {
-  buf = (&pg.pgproto3.CommandComplete{CommandTag: []byte(msg)}).Encode(buf)
-  buf = (&pg.pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
+  buf = (&pgproto3.CommandComplete{CommandTag: []byte(msg)}).Encode(buf)
+  buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
   _, err := pc.conn.Write(buf)
   if err != nil {
     log.Printf("Failed to write query response: %s", err)
@@ -354,18 +354,18 @@ func (pc pgConn) done(buf []byte, msg string) {
 
 var dataTypeOIDMap = map[string]uint32{
   "text": 25,
-  "pg_catalog.int4": 23
+  "pg_catalog.int4": 23,
 }
 
 func (pc pgConn) writePgResult(res *pgResult) {
   rd := &pgproto3.RowDescription{}
   for i, field := range res.fieldNames {
-    rd.Fields = append(rd.Fields, pg.proto3.FieldDescription{
+    rd.Fields = append(rd.Fields, pgproto3.FieldDescription{
       Name:        []byte(field),
-      DataTypeOID: dataTypeOIDMap[res.fieldTypes[i]]
+      DataTypeOID: dataTypeOIDMap[res.fieldTypes[i]],
     })
   }
-  buf = rd.Encode(nil)
+  buf := rd.Encode(nil)
   for _, row := range res.rows {
     dr := &pgproto3.DataRow{}
     for _, value := range row {
@@ -507,6 +507,85 @@ type config struct {
   pgPort   string
 }
 
+func getConfig() config {
+  cfg := config{}
+  for i, arg := range os.Args[1:] {
+    if arg == "--node-id" {
+      cfg.id = os.Args[i+2]
+      i++
+      continue
+    }
+
+    if arg == "--http-port" {
+      cfg.httpPort = os.Args[i+2]
+      i++
+      continue
+    }
+
+    if arg == "--raft-port" {
+      cfg.raftPort = os.Args[i+2]
+      i++
+      continue
+    }
+
+    if arg == "--pg-port" {
+      cfg.pgPort = os.Args[i+2]
+      i++
+      continue
+    }
+  }
+
+  if cfg.id == "" {
+    log.Fatal("Missing required parameter: --node-id")
+  }
+  if cfg.raftPort == "" {
+    log.Fatal("Missing required parameter: --raft-port")
+  }
+  if cfg.httpPort == "" {
+    log.Fatal("Missing required parameter: --http-port")
+  }
+  if cfg.pgPort == "" {
+    log.Fatal("Missing required parameter: --pg-port")
+  }
+
+  return cfg
+}
+
+func main() {
+  cfg := getConfig()
+
+  dataDir := "data"
+  err := os.MkdirAll(dataDir, os.ModePerm)
+  if err != nil {
+    log.Fatalf("Could not create directory: %s", err)
+  }
+
+  db, err := bolt.Open(path.Join(dataDir, "data" + cfg.id), 0600, nil)
+  if err != nil {
+    log.Fatalf("Could not open bolt db: %s", err)
+  }
+  defer db.Close()
+
+  pe := newPgEngine(db)
+  pe.delete()
+
+  pf := &pgFsm{pe}
+  r, err := setupRaft(path.Join(dataDir, "raft"+cfg.id), cfg.id, "localhost:"+cfg.raftPort, pf)
+  if err != nil {
+    log.Fatal(err)
+  }
+
+  hs := httpServer{r}
+  http.HandleFunc("/add-follower", hs.addFollowerHandler)
+  go func() {
+    err := http.ListenAndServe(":"+cfg.httpPort, nil)
+    if err != nil {
+      log.Fatal(err)
+    }
+  }()
+
+  runPgServer(cfg.pgPort, db, r)
+}
 
 /*
 
