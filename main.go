@@ -36,6 +36,12 @@ type httpServer struct {
   r *raft.Raft
 }
 
+type tableDefinition struct {
+  Name        string
+  ColumnNames []string
+  ColumnTypes []string
+}
+
 func newPgEngine(db *bolt.DB) *pgEngine {
   return &pgEngine{db, []byte("data")}
 }
@@ -57,6 +63,46 @@ func (pe *pgEngine) execute(tree *pgquery.ParseResult) error {
     }
 
     return fmt.Errorf("Unknown statement type: %s", stmt)
+  }
+
+  return nil
+}
+
+func (pe *pgEngine) executeCreate(stmt *pgquery.CreateStmt) error {
+  tbl := tableDefinition{}
+  tbl.Name = stmt.Relation.Relname
+
+  for _, c := range stmt.TableElts {
+    cd := c.GetColumnDef()
+
+    tbl.ColumnNames = append(tbl.ColumnNames, cd.Colname)
+
+    var columnType string
+    for _, n := range cd.TypeName.Names {
+      if columnType != "" {
+        columnType += "."
+      }
+      columnType += n.GetString_().Str
+    }
+    tbl.ColumnTypes = append(tbl.ColumnTypes, columnType)
+  }
+
+  tableBytes, err := json.Marshal(tbl)
+  if err != nil {
+    return fmt.Errorf("Could not marshall table: %s", err)
+  }
+
+  err = pe.db.Update(func (tx *bolt.Tx) error {
+    bkt, err := tx.CreateBucketIfNotExists(pe.bucketName)
+    if err != nil {
+      return err
+    }
+
+    return bkt.Put([]byte("tables_" + tbl.Name), tableBytes)
+  })
+
+  if err != nil {
+    return fmt.Errorf("Could not set key-value store: %s", err)
   }
 
   return nil
