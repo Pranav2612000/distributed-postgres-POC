@@ -42,6 +42,26 @@ type tableDefinition struct {
   ColumnTypes []string
 }
 
+func (pe *pgEngine) getTableDefinition(name string) (*tableDefinition, error) {
+  var tbl tableDefinition
+  err := pe.db.View(func(tx *bolt.Tx) error {
+    bkt := tx.Bucket(pe.bucketName)
+    if bkt == nil {
+      return fmt.Errorf("Table does not exist")
+    }
+
+    valBytes := bkt.Get([]byte("table_" + name))
+    err := json.Unmarshal(valBytes, &tbl)
+    if err != nil {
+      return fmt.Errorf("Could not unmarshal table: %s", err)
+    }
+
+    return nil
+  })
+
+  return &tbl, err
+}
+
 func newPgEngine(db *bolt.DB) *pgEngine {
   return &pgEngine{db, []byte("data")}
 }
